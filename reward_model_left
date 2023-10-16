@@ -1,0 +1,213 @@
+# Copyright (c) Microsoft Corporation.
+# SPDX-License-Identifier: Apache-2.0
+
+# DeepSpeed Team
+import torch
+from torch import nn
+
+
+## Note that the following code is modified from
+## https://github.com/CarperAI/trlx/blob/main/examples/summarize_rlhf/reward_model/reward_model.py
+class RewardModel(nn.Module):
+
+    def __init__(self, base_model, tokenizer, num_padding_at_beginning=0):
+        super().__init__()
+        self.config = base_model.config
+        self.num_padding_at_beginning = num_padding_at_beginning
+        if hasattr(self.config, "word_embed_proj_dim"):
+            # `OPT` models use word_embed_proj_dim as final output
+            # https://github.com/huggingface/transformers/blob/main/src/transformers/models/opt/modeling_opt.py#L497
+            self.v_head = nn.Linear(self.config.word_embed_proj_dim,
+                                    1,
+                                    bias=False)
+        # elif self.config.model_type ==  "chatglm":
+        #     # `OPT` models use word_embed_proj_dim as final output
+        #     # https://github.com/huggingface/transformers/blob/main/src/transformers/models/opt/modeling_opt.py#L497
+        #     self.v_head = nn.Linear(self.config.vocab_size, 1, bias=False)
+        else:
+            # `gpt-neo(x)` models use `hidden_size` attribute names instead of `n_embd``
+            self.config.n_embd = self.config.hidden_size if hasattr(
+                self.config, "hidden_size") else self.config.n_embd
+            self.v_head = nn.Linear(self.config.n_embd, 1, bias=False)
+        self.rwtranrsformer = base_model
+        self.PAD_ID = tokenizer.pad_token_id
+
+        self.model_type_bool =  'Baichuan' in tokenizer.name_or_path
+
+    def gradient_checkpointing_enable(self):
+        self.rwtranrsformer.gradient_checkpointing_enable()
+
+    def gradient_checkpointing_disable(self):
+        self.rwtranrsformer.gradient_checkpointing_disable()
+
+    def forward(self,
+                input_ids=None,
+                past_key_values=None,
+                attention_mask=None,
+                position_ids=None,
+                head_mask=None,
+                inputs_embeds=None,
+                use_cache=False):
+        loss = None
+
+        if self.config.model_type in ("llama" , "chatglm") or self.model_type_bool :
+            kwargs = dict()
+        else:
+            kwargs = dict(head_mask=head_mask)
+
+        if self.config.model_type in ( "chatglm"):
+            transformer_outputs = self.rwtranrsformer.transformer(
+                input_ids,
+                past_key_values=past_key_values,
+                attention_mask=attention_mask,
+                inputs_embeds=inputs_embeds,
+                use_cache=use_cache,
+                **kwargs)
+        elif self.model_type_bool :
+            transformer_outputs = self.rwtranrsformer.model(
+                input_ids,
+                past_key_values=past_key_values,
+                attention_mask=attention_mask,
+                inputs_embeds=inputs_embeds,
+                use_cache=use_cache,
+                **kwargs)
+        else:
+            transformer_outputs = self.rwtranrsformer(
+                input_ids,
+                past_key_values=past_key_values,
+                attention_mask=attention_mask,
+                inputs_embeds=inputs_embeds,
+                use_cache=use_cache,
+                **kwargs)
+
+        hidden_states = transformer_outputs[0]
+        rewards = self.v_head(hidden_states).squeeze(-1)
+        chosen_mean_scores = []
+        rejected_mean_scores = []
+
+        # Split the inputs and rewards into two parts, chosen and rejected
+        assert len(input_ids.shape) == 2
+        bs = input_ids.shape[0] // 2
+        seq_len = input_ids.shape[1]
+
+        chosen_ids = input_ids[:bs]  # bs x seq x 1
+        rejected_ids = input_ids[bs:]
+        chosen_rewards = rewards[:bs]
+        rejected_rewards = rewards[bs:]
+
+        # Compute pairwise loss. Only backprop on the different tokens before padding
+        loss = 0
+        for i in range(bs):
+            chosen_id = chosen_ids[i]
+            rejected_id = rejected_ids[i]
+            chosen_reward = chosen_rewards[i]
+            rejected_reward = rejected_rewards[i]
+
+            ## self.num_padding_at_beginning == 1
+            check_divergence = (chosen_id != rejected_id).nonzero()
+
+            # max_seq_len为10，pad_token_id为0，
+            # 有同属同个prompt的chosen_sentence和reject_sentence:
+            # prompt: [11, 22, 33]
+            # chosen_sentence: [11, 22, 33, 44, 55, 66, 0, 0, 0, 0]
+            # reject_sentence: [11, 22, 33, 40, 50, 0, 0, 0, 0, 0]
+            # “两者answer的对齐部分”即为“非prompt部分也非padding部分、但长度要对齐”：
+            # chosen_truncated: [44, 55, 66]
+            # reject_truncated: [40, 50, 0]
+            # chosen_sentence的answer比较长，所以reject_sentence在取相应部分时要取至与chosen部分等长为止；
+            # reject_sentence的answer较长时同理。
+
+            if len(check_divergence) == 0:
+                end_ind = rejected_reward.size(-1)  #该方法返回的是当前张量的形状,返回值是元组tuple的一个子类
+                divergence_ind = end_ind - 1
+
+            else:
+                # Check if there is any padding otherwise take length of sequence
+                end_ind = rejected_reward.size(-1)  # 该方法返回的是当前张量的形状,返回值是元组tuple的一个子类
+                divergence_ind = check_divergence[-1]
+
+            # pad_token_id = 0
+            # conversation = [11, 22, 33, 44, 55, 66, 0, 0, 0, 0]
+            # conversation_rewards = [2.01, 0.23, 2.89, 0.66, 0.33, 2.25, 0.36, 0.99, 1.32, 1.62]
+            # token_id为66的token作为该对话的最后1个有效token，
+            # 其对应的reward“2.25”将被用于表示整个对话的reward。
+
+            assert divergence_ind > 0
+            c_truncated_reward = chosen_reward[divergence_ind:end_ind]
+            r_truncated_reward = rejected_reward[divergence_ind:end_ind]
+            chosen_mean_scores.append(
+                chosen_reward[end_ind - 1])  #use the end score for reference
+            rejected_mean_scores.append(rejected_reward[end_ind - 1])
+
+            loss += -torch.nn.functional.logsigmoid(c_truncated_reward -
+                                                    r_truncated_reward).mean()
+
+        loss = loss / bs
+        chosen_mean_scores = torch.stack(chosen_mean_scores)
+        rejected_mean_scores = torch.stack(rejected_mean_scores)
+        return {
+            "loss": loss,
+            "chosen_mean_scores": chosen_mean_scores,
+            "rejected_mean_scores": rejected_mean_scores,
+        }
+
+    def forward_value(self,
+                      input_ids=None,
+                      attention_mask=None,
+                      past_key_values=None,
+                      position_ids=None,
+                      head_mask=None,
+                      inputs_embeds=None,
+                      return_value_only=False,
+                      prompt_length=0,
+                      use_cache=False):
+
+        if self.config.model_type in ("llama" , "chatglm") or self.model_type_bool :
+            kwargs = dict()
+        else:
+            kwargs = dict(head_mask=head_mask)
+
+        if self.config.model_type in ( "chatglm"):
+            transformer_outputs = self.rwtranrsformer.transformer(
+                input_ids,
+                past_key_values=past_key_values,
+                attention_mask=attention_mask,
+                inputs_embeds=inputs_embeds,
+                use_cache=use_cache,
+                **kwargs)
+        elif self.model_type_bool :
+            transformer_outputs = self.rwtranrsformer.model(
+                input_ids,
+                past_key_values=past_key_values,
+                attention_mask=attention_mask,
+                inputs_embeds=inputs_embeds,
+                use_cache=use_cache,
+                **kwargs)
+        else:
+            transformer_outputs = self.rwtranrsformer(
+                input_ids,
+                past_key_values=past_key_values,
+                attention_mask=attention_mask,
+                inputs_embeds=inputs_embeds,
+                use_cache=use_cache,
+                **kwargs)
+        hidden_states = transformer_outputs[0]
+        values = self.v_head(hidden_states).squeeze(-1)
+        if return_value_only:
+            return values
+        else:
+            # [0 0 0 0 prompt, answer, 0 0 0 0 ] for step 3, we have padding at the beginning
+            # [prompt, answer, 0, 0, 0, 0] this is normal
+            assert prompt_length > 1, "prompt_length must be greater than 1 to help select the end score"
+            bs = values.size(0)
+            seq_len = input_ids.shape[1]
+            chosen_end_scores = [
+            ]  # we use this name for consistency with the original forward function
+            for i in range(bs):
+                value = values[i]
+
+                chosen_end_scores.append(value[seq_len - 1])
+            return {
+                "values": values,
+                "chosen_end_scores": torch.stack(chosen_end_scores),
+            }
