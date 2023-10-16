@@ -218,16 +218,8 @@ def create_dataset_split(current_dataset, raw_dataset, train_phase, tokenizer,
             if chosen_sentence is not None and reject_sentence is not None:
                 chosen_sentence += end_of_conversation_token  # the accept response
                 reject_sentence += end_of_conversation_token
-                chosen_token = tokenizer(chosen_sentence,
-                                         max_length=max_seq_len,
-                                         padding="max_length",
-                                         truncation=True,
-                                         return_tensors="pt")
-                reject_token = tokenizer(reject_sentence,
-                                         max_length=max_seq_len,
-                                         padding="max_length",
-                                         truncation=True,
-                                         return_tensors="pt")
+                chosen_token = token_fun(tokenizer,chosen_sentence,max_seq_len)
+                reject_token = token_fun(tokenizer,reject_sentence,max_seq_len)
                 chosen_token["input_ids"] = chosen_token["input_ids"]
                 chosen_token["attention_mask"] = chosen_token["attention_mask"]
                 chosen_dataset.append(chosen_token)
@@ -241,7 +233,7 @@ def create_dataset_split(current_dataset, raw_dataset, train_phase, tokenizer,
             # tokenize the text
             prompt = raw_dataset.get_prompt(tmp_data)
             if prompt is not None:
-                prompt_token = tokenizer(prompt, return_tensors="pt")
+                prompt_token = token_fun(tokenizer,prompt,max_seq_len)
                 prompt_token["input_ids"] = prompt_token["input_ids"]
                 prompt_token["attention_mask"] = prompt_token["attention_mask"]
                 # for key_word in ["input_ids", "attention_mask"]:
@@ -415,7 +407,7 @@ class DataCollatorRLHF:
         pad_length = self.max_token_len - length
         if pad_length > 0:
             batch["prompt"] = F.pad(prompt,
-                                    pad=(0, pad_length),
+                                    pad=(0, pad_length), #左边填充数， 右边填充数， 上边填充数， 下边填充数
                                     mode='constant',
                                     value=pad_token_id)
             batch["prompt_att_mask"] = F.pad(prompt_mask,
