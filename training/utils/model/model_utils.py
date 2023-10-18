@@ -15,6 +15,7 @@ from huggingface_hub import snapshot_download
 from transformers.deepspeed import HfDeepSpeedConfig
 
 from .reward_model import RewardModel
+from .reward_model_left import RewardModelLeft
 from ..utils import load_state_dict_into_model
 from ..glm2.modeling_chatglm import ChatGLMForConditionalGeneration as ChatGLM2ForConditionalGeneration
 from ..glm2.tokenization_chatglm import ChatGLMTokenizer as ChatGLM2Tokenizer
@@ -84,10 +85,20 @@ def create_critic_model(model_name_or_path,
     if torch.distributed.get_rank() == 0:
         print(f"> Creating model from_config took {end - start} seconds")
 
-    critic_model = RewardModel(
-        critic_model,
-        tokenizer,
-        num_padding_at_beginning=num_padding_at_beginning)
+    substrings_to_check = ["chatglm", "llama", "Baichuan"]
+    result = any(substring in model_name_or_path for substring in substrings_to_check)
+
+    if result:
+        critic_model = RewardModelLeft(
+            critic_model,
+            tokenizer,
+            num_padding_at_beginning=num_padding_at_beginning)
+
+    else:
+        critic_model = RewardModel(
+            critic_model,
+            tokenizer,
+            num_padding_at_beginning=num_padding_at_beginning)
 
     if rlhf_training:
         # load critic model from checkpoint
