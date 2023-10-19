@@ -2,6 +2,7 @@
 
 
 ## 支持chatglm,chatglm2,baichuan,baichuan2
+## 支持padding-left
 
 ## 一、chatglm,chatglm2
 
