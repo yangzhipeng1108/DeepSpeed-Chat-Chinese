@@ -150,14 +150,14 @@ class PromptDataset(Dataset):
                 "labels": self.chosen_dataset[idx]["labels"]
             }
         elif self.train_phase == 2:
-            return self.chosen_dataset[idx]["input_ids"], self.chosen_dataset[idx]["attention_mask"], \
-                self.reject_dataset[idx]["input_ids"], self.reject_dataset[idx]["attention_mask"]
+            return torch.LongTensor(self.chosen_dataset[idx]["input_ids"]), torch.LongTensor(self.chosen_dataset[idx]["attention_mask"]), \
+                torch.LongTensor(self.reject_dataset[idx]["input_ids"]), torch.LongTensor(self.reject_dataset[idx]["attention_mask"])
         elif self.train_phase == 3:
             return self.prompt_dataset[idx]["input_ids"],self.prompt_dataset[idx]["attention_mask"], \
                 self.pad_token_id
 
 
-def token_fun(tokenizer,sentence,max_seq_len):
+def token_fun(tokenizer,sentence,max_seq_len,use_padding = False):
     sentence = sentence.replace('Human:', '问：')
     sentence = sentence.replace(' Assistant:', ' 答：')
 
@@ -179,11 +179,16 @@ def token_fun(tokenizer,sentence,max_seq_len):
         input_ids = [tokenizer.get_command("[gMASK]"),
                      tokenizer.get_command("sop")] + tokenizer.convert_tokens_to_ids(tokens)
         context_length = len(src_tokens) + 2
+
     else:
         input_ids = tokenizer.convert_tokens_to_ids(tokens)
         context_length = len(src_tokens)
 
-    labels = [-100] * context_length + input_ids[context_length:]
+    if use_padding:
+        input_ids = [0] * (max_seq_len - len(input_ids)) + input_ids
+        labels = [-100] * (max_seq_len - len(input_ids[context_length:])) + input_ids[context_length:]
+    else:
+        labels = [-100] * context_length + input_ids[context_length:]
 
     attention_mask= list(map(lambda x: 0 if x ==0 else 1, input_ids))
 
@@ -218,8 +223,8 @@ def create_dataset_split(current_dataset, raw_dataset, train_phase, tokenizer,
             if chosen_sentence is not None and reject_sentence is not None:
                 chosen_sentence += end_of_conversation_token  # the accept response
                 reject_sentence += end_of_conversation_token
-                chosen_token = token_fun(tokenizer,chosen_sentence,max_seq_len)
-                reject_token = token_fun(tokenizer,reject_sentence,max_seq_len)
+                chosen_token = token_fun(tokenizer,chosen_sentence,max_seq_len,use_padding = True)
+                reject_token = token_fun(tokenizer,reject_sentence,max_seq_len,use_padding = True)
                 chosen_token["input_ids"] = chosen_token["input_ids"]
                 chosen_token["attention_mask"] = chosen_token["attention_mask"]
                 chosen_dataset.append(chosen_token)
@@ -227,6 +232,7 @@ def create_dataset_split(current_dataset, raw_dataset, train_phase, tokenizer,
                 reject_token["input_ids"] = reject_token["input_ids"]
                 reject_token["attention_mask"] = reject_token["attention_mask"]
                 reject_dataset.append(reject_token)
+
 
     elif train_phase == 3:
         for i, tmp_data in enumerate(current_dataset):
@@ -379,9 +385,11 @@ class DataCollatorReward:
         batch["input_ids"] = torch.cat([f[0]
                                         for f in data] + [f[2] for f in data],
                                        dim=0)
+        batch["input_ids"] = batch["input_ids"].reshape(len(data) * 2, -1)
         batch["attention_mask"] = torch.cat([f[1] for f in data] +
                                             [f[3] for f in data],
                                             dim=0)
+        batch["attention_mask"] = batch["attention_mask"].reshape(len(data) * 2, -1)
         return batch
 
 
