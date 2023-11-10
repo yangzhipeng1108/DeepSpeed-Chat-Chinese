@@ -153,7 +153,7 @@ class PromptDataset(Dataset):
             return torch.LongTensor(self.chosen_dataset[idx]["input_ids"]), torch.LongTensor(self.chosen_dataset[idx]["attention_mask"]), \
                 torch.LongTensor(self.reject_dataset[idx]["input_ids"]), torch.LongTensor(self.reject_dataset[idx]["attention_mask"])
         elif self.train_phase == 3:
-            return self.prompt_dataset[idx]["input_ids"],self.prompt_dataset[idx]["attention_mask"], \
+            return torch.LongTensor(self.prompt_dataset[idx]["input_ids"]),torch.LongTensor(self.prompt_dataset[idx]["attention_mask"]), \
                 self.pad_token_id
 
 
