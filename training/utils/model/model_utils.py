@@ -33,10 +33,10 @@ def create_hf_model(model_class,
         model_config.dropout = 0.0
     # Note: dschf is defined in function scope to avoid global effects
     # https://huggingface.co/docs/transformers/main_classes/deepspeed#nontrainer-deepspeed-integration
-    # if ds_config is not None and ds_config["zero_optimization"]["stage"] == 3:
-    #     dschf = HfDeepSpeedConfig(ds_config)
-    # else:
-    #     dschf = None
+    if ds_config is not None and ds_config["zero_optimization"]["stage"] == 3:
+        dschf = HfDeepSpeedConfig(ds_config)
+    else:
+        dschf = None
 
     if 'chatglm' in model_name_or_path:
         # the weight loading is handled by create critic model
@@ -75,20 +75,15 @@ def create_critic_model(model_name_or_path,
 
     start = time.time()
 
-    if 'Baichuan' in model_name_or_path:
-        critic_model = create_hf_model(AutoModelForCausalLM, model_name_or_path, tokenizer,
+
+    critic_model = create_hf_model(AutoModelForCausalLM, model_name_or_path, tokenizer,
                                        ds_config, rlhf_training, disable_dropout)
-    else:
-        critic_model = create_hf_model(AutoModel, model_name_or_path, tokenizer,
-                                       ds_config, rlhf_training, disable_dropout)
+
     end = time.time()
     if torch.distributed.get_rank() == 0:
         print(f"> Creating model from_config took {end - start} seconds")
 
-    substrings_to_check = ["chatglm", "llama", "Baichuan"]
-    result = any(substring in model_name_or_path for substring in substrings_to_check)
-
-    if result:
+    if critic_model.config.model_type in ("chatglm", "llama", "baichuan"):
         critic_model = RewardModelLeft(
             critic_model,
             tokenizer,
